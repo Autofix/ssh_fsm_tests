@@ -2,19 +2,27 @@
 // #![no_main]
 
 use heapless::String;
-// Inspired by https://play.rust-lang.org/?version=stable&mode=debug&edition=2015&gist=ee3e4df093c136ced7b394dc7ffb78e1
-// Originally described in https://hoverbear.org/blog/rust-state-machine-pattern/
-// Resurfaced at HN: https://news.ycombinator.com/item?id=43741051
+// // Inspired by https://play.rust-lang.org/?version=stable&mode=debug&edition=2015&gist=ee3e4df093c136ced7b394dc7ffb78e1
+// // Originally described in https://hoverbear.org/blog/rust-state-machine-pattern/
+// // Resurfaced at HN: https://news.ycombinator.com/item?id=43741051
 
-// Tenets:
-//  1. Lightweight and easy to understand/change.
-//  2. Should not interfere in performance, only "big" state transitions should be tracked (not micromanage on bytes sent, etc...).
-//  3. Non intrusive in application code.
+// // Tenets:
+// //  1. Lightweight and easy to understand/change.
+// //  2. Should not interfere in performance, only "big" state transitions should be tracked (not micromanage on bytes sent, etc...).
+// //  3. Non intrusive in application code.
 
 #[cfg(not(feature = "std"))]
 use core::panic::PanicInfo;
 // use strum::IntoEnumIterator;
 // use strum_macros::EnumIter;
+
+// use crate::settings;
+
+struct TaskOk {
+    ssh: bool,
+    uart: bool,
+    bridge: bool,
+}
 
 #[derive(Debug, PartialEq, Clone)]
 enum WifiMode {
@@ -28,11 +36,40 @@ struct Settings {
     uart_baud: Option<u32>,
 }
 
-struct TaskOk {
-    ssh: bool,
-    uart: bool,
-    bridge: bool,
-}
+// impl Settings {
+//     fn read_uart_settings(&self) -> Option<u32> {
+//         self.uart_baud
+//     }
+//     fn read_wifi_settings(&self) -> Option<WifiMode> {
+//         self.wifi_mode.clone()
+//     }
+//     fn read_ssh_password_settings(&self) -> Option<String<20>> {
+//         self.ssh_password.clone()
+//     }
+
+//     fn store_settings(
+//         &mut self,
+//         new_wifi_mode: Option<WifiMode>,
+//         new_ssh_password: Option<String<20>>,
+//         new_uart_baud: Option<u32>,
+//     ) {
+//         if new_wifi_mode != None {
+//             self.wifi_mode = new_wifi_mode;
+//         }
+//         if new_ssh_password != None {
+//             self.ssh_password = new_ssh_password;
+//         }
+//         if new_uart_baud != None {
+//             self.uart_baud = new_uart_baud;
+//         }
+//     }
+// }
+
+// static mut SETTINGS: Settings = Settings{
+//   wifi_mode: None,
+//   ssh_password: None,
+//   uart_baud: None,
+// };
 
 #[derive(Debug, PartialEq)]
 pub enum State<'a> {
@@ -65,6 +102,7 @@ pub enum State<'a> {
     UartReconf,
     WifiReconf,
     SshReconf,
+    CheckBridge,
     SshUartBridgeEstablished,
     ClientConnectedNoBridge,
     ClientNotify { error: &'a str },
@@ -75,9 +113,9 @@ pub enum State<'a> {
 enum Event {
     AllGood,
     Fail,
-    DefaultModeUp,
-    ApModeUp,
-    StaModeUp,
+    StartDefaultAp,
+    StartApMode,
+    StartStaMode,
     // UartReconf,
     ClientConnect,
     Timeout,
@@ -116,25 +154,23 @@ impl<'a> StateMachine<'a> {
             (State::PowerOn, Event::AllGood) => State::InitPeripherals,
             (State::Reset, Event::AllGood) => State::InitPeripherals,
             (State::InitPeripherals, Event::AllGood) => State::TcpInit,
-            (State::TcpInit, Event::AllGood) => match self.settings.wifi_mode {
-                None => State::TcpStartDefault,
-                Some(WifiMode::ApMode) => State::TcpStartApMode,
-                Some(WifiMode::StaMode) => State::TcpStartStaMode,
-            },
             (State::InitPeripherals, Event::Fail) => State::Reset,
-            (State::TcpStartDefault, Event::DefaultModeUp) => State::TaskSpawning { name: "ssh" },
+            (State::TcpInit, Event::StartApMode) => State::TcpStartApMode,
+            (State::TcpInit, Event::StartStaMode) => State::TcpStartStaMode,
+            (State::TcpInit, Event::StartDefaultAp) => State::TcpStartDefault,
+            (State::TcpInit, Event::Fail) => State::Reset,
+            (State::TcpStartDefault, Event::AllGood) => State::TaskSpawning { name: "ssh" },
             (State::TcpStartDefault, Event::Fail) => State::Reset,
-            (State::TcpStartApMode, Event::ApModeUp) => State::TaskSpawning { name: "ssh" },
+            (State::TcpStartApMode, Event::AllGood) => State::TaskSpawning { name: "ssh" },
             (State::TcpStartApMode, Event::Fail) => State::Reset,
-            (State::TcpStartStaMode, Event::StaModeUp) => State::TaskSpawning { name: "ssh" },
+            (State::TcpStartStaMode, Event::AllGood) => State::TaskSpawning { name: "ssh" },
             (State::TcpStartStaMode, Event::Fail) => State::Reset,
             (State::TaskSpawning { name: "ssh" }, Event::AllGood) => {
                 State::TaskRunning { name: "ssh" }
             }
-            (State::TaskRunning { name: "ssh" }, Event::AllGood) => match self.task_ok.uart {
-                true => State::BridgeInit,
-                false => State::TaskSpawning { name: "uart" },
-            },
+            (State::TaskRunning { name: "ssh" }, Event::AllGood) => {
+                State::TaskSpawning { name: "uart" }
+            }
             (State::TaskSpawning { name: "uart" }, Event::AllGood) => {
                 State::TaskRunning { name: "uart" }
             }
@@ -142,9 +178,6 @@ impl<'a> StateMachine<'a> {
             (State::TaskRunning { name: "uart" }, Event::Fail) => State::Idle,
             (State::BridgeInit, Event::AllGood) => State::Idle,
             (State::BridgeInit, Event::Fail) => State::Idle,
-            // (State::TaskSpawning { .. }, Event::AllGood) => State::TaskRunning { name: "A task?" },
-            // (State::AllTasksOk, Event::AllGood) => State::BridgeUp,
-            // (State::BridgeUp, Event::AllGood) => State::Idle,
             (State::Idle, Event::ClientConnect) => State::ClientConnecting,
             (State::ClientConnecting, Event::AllGood) => State::AuthzChecks,
             (State::ClientConnecting, Event::Timeout) => State::Idle,
@@ -163,10 +196,9 @@ impl<'a> StateMachine<'a> {
                 },
                 Event::AllGood,
             ) => State::Idle,
-            (State::StoreEnvVars, Event::AllGood) => match self.task_ok.bridge {
-                true => State::SshUartBridgeEstablished,
-                false => State::ClientConnectedNoBridge,
-            },
+            (State::StoreEnvVars, Event::AllGood) => State::CheckBridge,
+            (State::CheckBridge, Event::AllGood) => State::SshUartBridgeEstablished,
+            (State::CheckBridge, Event::Fail) => State::ClientConnectedNoBridge,
             (State::SshUartBridgeEstablished, Event::SshDisconnect) => State::Idle,
             (State::ClientConnectedNoBridge, Event::AllGood) => State::ClientNotify {
                 error: "Bridge error",
@@ -218,6 +250,7 @@ impl<'a> StateMachine<'a> {
             State::SshReconf => self.send_notification(Event::SshSettingsChanged),
             State::UartReconf => self.send_notification(Event::UartSettingsChanged),
             State::WifiReconf => self.send_notification(Event::WifiSettingsChanged),
+            State::CheckBridge => self.check_bridge(),
             State::SshUartBridgeEstablished => self.ssh_uart_bridge_established(true),
             State::ClientConnectedNoBridge => self.client_connected_no_bridge(true),
             State::ClientNotify {
@@ -252,7 +285,11 @@ impl<'a> StateMachine<'a> {
         #[cfg(feature = "std")]
         println!("Initalising TCP");
         if tcp_init_good {
-            Event::AllGood
+            match self.settings.wifi_mode {
+                None => Event::StartDefaultAp,
+                Some(WifiMode::ApMode) => Event::StartApMode,
+                Some(WifiMode::StaMode) => Event::StartStaMode,
+            }
         } else {
             Event::Fail
         }
@@ -262,11 +299,11 @@ impl<'a> StateMachine<'a> {
         #[cfg(feature = "std")]
         println!("Starting TCP Stack {:?}", wifimode);
         if wifimode == None {
-            Event::DefaultModeUp
+            Event::AllGood
         } else if wifimode == Some(WifiMode::ApMode) {
-            Event::ApModeUp
+            Event::AllGood
         } else if wifimode == Some(WifiMode::StaMode) {
-            Event::StaModeUp
+            Event::AllGood
         } else {
             Event::Fail
         }
@@ -303,6 +340,7 @@ impl<'a> StateMachine<'a> {
         } else if task == "uart" {
             #[cfg(feature = "std")]
             println!("Running Uart task");
+            self.task_ok.uart = true;
             Event::AllGood
         } else {
             Event::Fail
@@ -391,12 +429,6 @@ impl<'a> StateMachine<'a> {
         println!("Storing env vars from client");
         if store_env_vars_ok {
             self.settings.wifi_mode = Some(WifiMode::ApMode);
-            // SETTINGS.store_settings(
-            //     Some(WifiMode::ApMode),
-            //     Some(String::<20>::new()),
-            //     Some(9600),
-            // );
-            // wifi_mode = Some(WifiMode::ApMode);
             self.settings.uart_baud = Some(9600);
             self.settings.ssh_password = Some(String::<20>::new());
             Event::AllGood
@@ -413,6 +445,16 @@ impl<'a> StateMachine<'a> {
         } else if notification_type == Event::UartSettingsChanged {
             Event::AllGood
         } else if notification_type == Event::WifiSettingsChanged {
+            Event::AllGood
+        } else {
+            Event::Fail
+        }
+    }
+
+    fn check_bridge(&self) -> Event {
+        #[cfg(feature = "std")]
+        println!("Checking if bridge is up");
+        if self.task_ok.bridge {
             Event::AllGood
         } else {
             Event::Fail
@@ -543,7 +585,7 @@ mod tests {
     fn tcp_init_to_tcp_start_default() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpInit;
-        let event: Event = Event::AllGood;
+        let event: Event = Event::StartDefaultAp;
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TcpStartDefault);
     }
@@ -552,7 +594,7 @@ mod tests {
     fn tcp_start_default_to_ssh() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartDefault;
-        let event: Event = Event::DefaultModeUp;
+        let event: Event = Event::AllGood;
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TaskSpawning { name: ("ssh") });
     }
@@ -570,7 +612,7 @@ mod tests {
     fn tcp_init_to_tcp_start_ap_mode() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpInit;
-        let event: Event = Event::AllGood;
+        let event: Event = Event::StartApMode;
         state_machine.settings.wifi_mode = Some(WifiMode::ApMode);
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TcpStartApMode);
@@ -580,7 +622,7 @@ mod tests {
     fn tcp_start_ap_mode_to_ssh() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartApMode;
-        let event: Event = Event::ApModeUp;
+        let event: Event = Event::AllGood;
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TaskSpawning { name: ("ssh") });
     }
@@ -598,7 +640,7 @@ mod tests {
     fn tcp_init_to_tcp_start_sta_mode() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpInit;
-        let event: Event = Event::AllGood;
+        let event: Event = Event::StartStaMode;
         state_machine.settings.wifi_mode = Some(WifiMode::StaMode);
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TcpStartStaMode);
@@ -608,7 +650,7 @@ mod tests {
     fn tcp_start_sta_mode_to_ssh() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartStaMode;
-        let event: Event = Event::StaModeUp;
+        let event: Event = Event::AllGood;
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TaskSpawning { name: ("ssh") });
     }
@@ -640,16 +682,6 @@ mod tests {
         // let tasks_ok: TaskOk = setup_tasks();
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TaskSpawning { name: ("uart") });
-    }
-
-    #[test]
-    fn ssh_running_uart_ok_to_bridge() {
-        let mut state_machine = StateMachine::new();
-        state_machine.state = State::TaskRunning { name: ("ssh") };
-        let event: Event = Event::AllGood;
-        state_machine.task_ok.uart = true;
-        state_machine.next(event);
-        assert_eq!(state_machine.state, State::BridgeInit);
     }
 
     #[test]
@@ -808,7 +840,7 @@ mod tests {
         let event: Event = Event::AllGood;
         state_machine.task_ok.bridge = true;
         state_machine.next(event);
-        assert_eq!(state_machine.state, State::SshUartBridgeEstablished);
+        assert_eq!(state_machine.state, State::CheckBridge);
     }
 
     #[test]
@@ -822,10 +854,20 @@ mod tests {
     }
 
     #[test]
-    fn store_env_vars_no_change_bridge_error() {
+    fn bridge_check_ok() {
         let mut state_machine = StateMachine::new();
-        state_machine.state = State::StoreEnvVars;
+        state_machine.state = State::CheckBridge;
         let event: Event = Event::AllGood;
+        state_machine.task_ok.bridge = true;
+        state_machine.next(event);
+        assert_eq!(state_machine.state, State::SshUartBridgeEstablished);
+    }
+
+    #[test]
+    fn bridge_check_error() {
+        let mut state_machine = StateMachine::new();
+        state_machine.state = State::CheckBridge;
+        let event: Event = Event::Fail;
         state_machine.next(event);
         assert_eq!(state_machine.state, State::ClientConnectedNoBridge);
     }
@@ -908,4 +950,14 @@ mod tests {
         state_machine.next(event);
         assert_eq!(state_machine.state, State::TaskSpawning { name: ("uart") });
     }
+
+    // #[test]
+    // fn task_spawning_to_task_running() {
+    //     let mut state: State = State::TaskSpawning { name: "G'day" };
+    //     let event: Event = Event::AllGood;
+    //     let settings: Settings = setup_settings();
+    //     let tasks_ok: TaskOk = setup_tasks();
+    //     state = state.next(event, &settings, &tasks_ok);
+    //     assert_eq!(state, State::TaskRunning { name: "A task?" });
+    // }
 }
