@@ -1,19 +1,25 @@
-[package]
-name = "fsm_tests"
-version = "0.1.0"
-edition = "2024"
+[workspace]
+members = [
+    "main",
+    "fsm",
+]
+resolver = "3"
 
-[dependencies]
-strum = { version = "0.27.1", default-features = false }
-strum_macros = { version = "0.27.1", default-features = false }
-heapless = "0.8"
-
-[features]
-default = ["std"]
-std = []
-
-[profile.release]
-panic = "abort"
 
 [profile.dev]
-panic = "abort"
+# Rust debug is too slow.
+# For debug builds always builds with some optimization
+opt-level = 3
+
+[profile.release]
+codegen-units = 1 # LLVM can perform better optimizations using a single thread
+debug = 2
+debug-assertions = false
+incremental = false
+lto = 'fat'
+opt-level = 3
+overflow-checks = false
+
+[profile.esp32s2]
+inherits = "release"
+opt-level = "s"  # Optimize for size.

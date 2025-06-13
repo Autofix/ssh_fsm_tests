@@ -1,0 +1,11 @@
+[package]
+name = "fsm"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cfg-if = "1.0.0"
+strum = { version = "0.27.1", default-features = false }
+strum_macros = { version = "0.27.1", default-features = false }
+#proptest-state-machine
+heapless = "0.8"

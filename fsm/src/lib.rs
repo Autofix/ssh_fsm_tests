@@ -1,5 +1,9 @@
-//#![no_std]
+#![cfg_attr(not(test), no_std)]
+#![cfg_attr(not(test), no_main)]
+// #![no_std]
 // #![no_main]
+
+//pub mod fsm;
 
 use heapless::String;
 // // Inspired by https://play.rust-lang.org/?version=stable&mode=debug&edition=2015&gist=ee3e4df093c136ced7b394dc7ffb78e1
@@ -11,14 +15,14 @@ use heapless::String;
 // //  2. Should not interfere in performance, only "big" state transitions should be tracked (not micromanage on bytes sent, etc...).
 // //  3. Non intrusive in application code.
 
-#[cfg(not(feature = "std"))]
-use core::panic::PanicInfo;
+#[cfg(test)]
+extern crate std;
+
 // use strum::IntoEnumIterator;
 // use strum_macros::EnumIter;
 
-// use crate::settings;
 
-struct TaskOk {
+pub struct TaskOk {
     ssh: bool,
     uart: bool,
     bridge: bool,
@@ -36,40 +40,6 @@ struct Settings {
     uart_baud: Option<u32>,
 }
 
-// impl Settings {
-//     fn read_uart_settings(&self) -> Option<u32> {
-//         self.uart_baud
-//     }
-//     fn read_wifi_settings(&self) -> Option<WifiMode> {
-//         self.wifi_mode.clone()
-//     }
-//     fn read_ssh_password_settings(&self) -> Option<String<20>> {
-//         self.ssh_password.clone()
-//     }
-
-//     fn store_settings(
-//         &mut self,
-//         new_wifi_mode: Option<WifiMode>,
-//         new_ssh_password: Option<String<20>>,
-//         new_uart_baud: Option<u32>,
-//     ) {
-//         if new_wifi_mode != None {
-//             self.wifi_mode = new_wifi_mode;
-//         }
-//         if new_ssh_password != None {
-//             self.ssh_password = new_ssh_password;
-//         }
-//         if new_uart_baud != None {
-//             self.uart_baud = new_uart_baud;
-//         }
-//     }
-// }
-
-// static mut SETTINGS: Settings = Settings{
-//   wifi_mode: None,
-//   ssh_password: None,
-//   uart_baud: None,
-// };
 
 #[derive(Debug, PartialEq)]
 pub enum State<'a> {
@@ -110,7 +80,7 @@ pub enum State<'a> {
 
 // #[derive(Debug, Copy, Clone, EnumIter)]
 #[derive(Debug, Copy, Clone, PartialEq)]
-enum Event {
+pub enum Event {
     AllGood,
     Fail,
     StartDefaultAp,
@@ -126,14 +96,14 @@ enum Event {
     WifiSettingsChanged,
 }
 
-struct StateMachine<'a> {
-    state: State<'a>,
+pub struct StateMachine<'a> {
+    pub state: State<'a>,
     settings: Settings,
     task_ok: TaskOk,
 }
 
 impl<'a> StateMachine<'a> {
-    fn new() -> Self {
+    pub fn new() -> Self {
         StateMachine {
             state: State::PowerOn,
             settings: Settings {
@@ -149,7 +119,7 @@ impl<'a> StateMachine<'a> {
         }
     }
 
-    fn next(&mut self, event: Event) {
+    pub fn next(&mut self, event: Event) {
         self.state = match (&self.state, event) {
             (State::PowerOn, Event::AllGood) => State::InitPeripherals,
             (State::Reset, Event::AllGood) => State::InitPeripherals,
@@ -223,7 +193,7 @@ impl<'a> StateMachine<'a> {
             }
         };
     }
-    fn run(&mut self) -> Event {
+    pub fn run(&mut self) -> Event {
         let event: Event;
 
         event = match self.state {
@@ -262,8 +232,8 @@ impl<'a> StateMachine<'a> {
     }
 
     fn power_on(&self, powergood: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Powering up");
+        #[cfg(test)]
+        std::println!("Powering up");
         if powergood {
             Event::AllGood
         } else {
@@ -272,8 +242,8 @@ impl<'a> StateMachine<'a> {
     }
 
     fn init_peripherals(&self, peripheralgood: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Starting peripherals up");
+        #[cfg(test)]
+        std::println!("Starting peripherals up");
         if peripheralgood {
             Event::AllGood
         } else {
@@ -282,8 +252,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn tcp_init(&self, tcp_init_good: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Initalising TCP");
+        #[cfg(test)]
+        std::println!("Initalising TCP");
+        // #[cfg(feature = "std")]
         if tcp_init_good {
             match self.settings.wifi_mode {
                 None => Event::StartDefaultAp,
@@ -296,8 +267,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn tcp_start(&self, wifimode: Option<WifiMode>) -> Event {
-        #[cfg(feature = "std")]
-        println!("Starting TCP Stack {:?}", wifimode);
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Starting TCP Stack {:?}", wifimode);
         if wifimode == None {
             Event::AllGood
         } else if wifimode == Some(WifiMode::ApMode) {
@@ -309,15 +281,18 @@ impl<'a> StateMachine<'a> {
         }
     }
     fn spawn_tasks(&self, task: &str) -> Event {
-        #[cfg(feature = "std")]
-        println!("Spawning a task");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Spawning a task");
         if task == "ssh" {
-            #[cfg(feature = "std")]
-            println!("Spawning SSH task");
+            // #[cfg(feature = "std")]
+            #[cfg(test)]
+            std::println!("Spawning SSH task");
             Event::AllGood
         } else if task == "uart" {
-            #[cfg(feature = "std")]
-            println!("Spawning Uart task");
+            // #[cfg(feature = "std")]
+            #[cfg(test)]
+            std::println!("Spawning Uart task");
             Event::AllGood
         } else {
             Event::Fail
@@ -330,16 +305,19 @@ impl<'a> StateMachine<'a> {
         // settings: Settings,
         // mut tasks_ok: TaskOk,
     ) -> Event {
-        #[cfg(feature = "std")]
-        println!("Running a task");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Running a task");
         if task == "ssh" {
-            #[cfg(feature = "std")]
-            println!("Running SSH task");
+            // #[cfg(feature = "std")]
+            #[cfg(test)]
+            std::println!("Running SSH task");
             self.task_ok.ssh = true;
             Event::AllGood
         } else if task == "uart" {
-            #[cfg(feature = "std")]
-            println!("Running Uart task");
+            // #[cfg(feature = "std")]
+            #[cfg(test)]
+            std::println!("Running Uart task");
             self.task_ok.uart = true;
             Event::AllGood
         } else {
@@ -348,8 +326,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn all_tasks_ok(&self, all_tasks_ok: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Connecting to client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Connecting to client");
         if all_tasks_ok {
             Event::AllGood
         } else {
@@ -358,8 +337,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn bridge_up(&self, bridge_up: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Bridging SSH to UART");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Bridging SSH to UART");
         if bridge_up {
             Event::AllGood
         } else {
@@ -368,8 +348,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn idle(&self, connect_client: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Connecting to client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Connecting to client");
         if connect_client {
             Event::ClientConnect
         } else if connect_client == false {
@@ -380,8 +361,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn connect_client(&self, connect_client: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Connecting to client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Connecting to client");
         if connect_client {
             Event::AllGood
         } else {
@@ -390,8 +372,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn authorization_checks(&self, authz_checks: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Checking ssh authorisation");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Checking ssh authorisation");
         if authz_checks {
             Event::AllGood
         } else {
@@ -400,8 +383,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn ssh_connection_initialisation(&self, ssh_connection: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Initialising ssh connection to client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Initialising ssh connection to client");
         if ssh_connection {
             Event::AllGood
         } else {
@@ -410,8 +394,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn read_env_vars(&self, read_env_vars_ok: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Reading env vars from client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Reading env vars from client");
         if read_env_vars_ok {
             Event::AllGood
         } else {
@@ -425,8 +410,9 @@ impl<'a> StateMachine<'a> {
         // mut settings: Settings,
         // tasks_ok: TaskOk,
     ) -> Event {
-        #[cfg(feature = "std")]
-        println!("Storing env vars from client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Storing env vars from client");
         if store_env_vars_ok {
             self.settings.wifi_mode = Some(WifiMode::ApMode);
             self.settings.uart_baud = Some(9600);
@@ -438,8 +424,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn send_notification(&self, notification_type: Event) -> Event {
-        #[cfg(feature = "std")]
-        println!("Sending notification to client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Sending notification to client");
         if notification_type == Event::SshSettingsChanged {
             Event::AllGood
         } else if notification_type == Event::UartSettingsChanged {
@@ -452,8 +439,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn check_bridge(&self) -> Event {
-        #[cfg(feature = "std")]
-        println!("Checking if bridge is up");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Checking if bridge is up");
         if self.task_ok.bridge {
             Event::AllGood
         } else {
@@ -462,8 +450,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn ssh_uart_bridge_established(&self, client_disconnect: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Storing env vars from client");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Storing env vars from client");
         if client_disconnect {
             Event::SshDisconnect
         } else {
@@ -472,8 +461,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn client_connected_no_bridge(&self, notify_prepared: bool) -> Event {
-        #[cfg(feature = "std")]
-        println!("Prepare to notify client of no bridge");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Prepare to notify client of no bridge");
         if notify_prepared {
             Event::AllGood
         } else {
@@ -482,8 +472,9 @@ impl<'a> StateMachine<'a> {
     }
 
     fn notify_client(&self, client_notified: &str) -> Event {
-        #[cfg(feature = "std")]
-        println!("Notified client of no bridge");
+        // #[cfg(feature = "std")]
+        #[cfg(test)]
+        std::println!("Notified client of no bridge");
         if client_notified == "no bridge" {
             Event::SshDisconnect
         } else {
@@ -494,43 +485,13 @@ impl<'a> StateMachine<'a> {
 
 // #[unsafe(no_mangle)]
 // #[cfg(feature = "std")]
-fn main() {
-    let mut state_machine = StateMachine::new();
-    // Sequence of events (might be dynamic based on what State::run did)
-    // TODO: Declare this array automatically from the enum definition above.
-    // let mut iter = Event::iter();
-
-    let mut event;
-
-    loop {
-        if let State::Failure(string) = state_machine.state {
-            #[cfg(feature = "std")]
-            println!("Failure {}", string);
-            break;
-        } else {
-            // You might want to do somethin while in a state
-            // You could also add State::enter() and State::exit()
-            event = state_machine.run();
-            // break;
-        }
-        //     // just a hack to get owned values, because I used an iterator
-        //     // let event = iter.next().unwrap().clone();
-        #[cfg(feature = "std")]
-        print!("__ Transition from {:?}", state_machine.state);
-        state_machine.next(event);
-        #[cfg(feature = "std")]
-        println!(" to {:?}", state_machine.state);
-    }
-    #[cfg(feature = "std")]
-    println!("end loop");
-}
-
-#[cfg(not(feature = "std"))]
-#[panic_handler]
-fn panic(_info: &PanicInfo) -> ! {
-    // Customize as needed. A common embedded-safe version:
-    loop {}
-}
+// #[entry]
+// #[cfg(feature = "std")]
+// #[cfg(test)]
+// #[cfg_attr(not(test), entry)]
+// #[cfg(not(test))]
+// cfg_if::cfg_if! {
+// if #[cfg(any(feature = "test"))] {
 
 #[cfg(test)]
 mod tests {

@@ -1,0 +1,71 @@
+# TODO: Potentially switch to cargo_xtask for easy re-targetting, i.e:
+# https://github.com/card-io-ecg/card-io-fw/blob/main/Cargo.toml
+
+[package]
+name = "ssh-stamp"
+version = "0.1.0"
+authors = ["Roman Valls Guimera <brainstorm@nopcode.org>"]
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+fsm = { path = "../fsm" }
+
+cfg-if = "1.0.0"
+embassy-executor = { version = "0.7"}
+esp-backtrace = { version = "0.15", features = [
+    "exception-handler",
+    "panic-handler",
+    "println",
+] }
+esp-hal = { version = "1.0.0-beta.0", features = [ "unstable" ] }
+esp-hal-embassy = { version = "0.8.1"}
+esp-println = { version = "0.13", features = ["log"] }
+heapless = "0.8"
+
+
+[features]
+
+# MCU options
+esp32 = [
+    "esp-hal/esp32",
+    "esp-backtrace/esp32",
+    "esp-hal-embassy/esp32",
+    "esp-println/esp32",
+    "embassy-executor/task-arena-size-40960",
+]
+esp32c2 = [
+    "esp-hal/esp32c2",
+    "esp-backtrace/esp32c2",
+    "esp-hal-embassy/esp32c2",
+    "esp-println/esp32c2",
+    "embassy-executor/task-arena-size-40960",
+]
+esp32c3 = [
+    "esp-hal/esp32c3",
+    "esp-backtrace/esp32c3",
+    "esp-hal-embassy/esp32c3",
+    "esp-println/esp32c3",
+    "embassy-executor/task-arena-size-40960",
+]
+esp32c6 = [
+    "esp-hal/esp32c6",
+    "esp-backtrace/esp32c6",
+    "esp-hal-embassy/esp32c6",
+    "esp-println/esp32c6",
+    "embassy-executor/task-arena-size-40960",
+]
+esp32s2 = [
+    "esp-hal/esp32s2",
+    "esp-backtrace/esp32s2",
+    "esp-hal-embassy/esp32s2",
+    "esp-println/esp32s2",
+    "embassy-executor/task-arena-size-32768",
+]
+esp32s3 = [
+    "esp-hal/esp32s3",
+    "esp-backtrace/esp32s3",
+    "esp-hal-embassy/esp32s3",
+   "esp-println/esp32s3",
+    "embassy-executor/task-arena-size-40960",
+]
