@@ -101,13 +101,14 @@ use esp_backtrace as _;
 // };
 // use esp_hal_embassy::InterruptExecutor;
 
+use core::task::Poll;
 use embassy_executor::Spawner;
-
+use fsm::EventResponse;
 // use static_cell::StaticCell;
 //
 // #[main]
 #[esp_hal_embassy::main]
-async fn main(_spawner: Spawner) {
+pub async fn main(_spawner: Spawner) {
     // System init
     // let peripherals = esp_hal::init({ esp_hal::Config::default() });
     // let mut rng = Rng::new(peripherals.RNG);
@@ -123,7 +124,7 @@ async fn main(_spawner: Spawner) {
     // TODO: Declare this array automatically from the enum definition above.
     // let mut iter = Event::iter();
 
-    let mut event;
+    let mut event_response: EventResponse<bool>;
 
     loop {
         if let fsm::State::Failure(_string) = state_machine.state {
@@ -134,15 +135,24 @@ async fn main(_spawner: Spawner) {
         } else {
             // You might want to do somethin while in a state
             // You could also add State::enter() and State::exit()
-            event = state_machine.run();
-            // break;
+            loop {
+                event_response = state_machine.run::<bool>();
+                // keep polling until task complete
+                if event_response.response == Poll::Pending {
+                    continue;
+                } else {
+                    // response is ready
+                    break;
+                }
+            }
         }
+
         //     // just a hack to get owned values, because I used an iterator
         //     // let event = iter.next().unwrap().clone();
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::print!("__ Transition from {:?}", state_machine.state);
-        state_machine.next(event);
+        state_machine.next(event_response.event);
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!(" to {:?}", state_machine.state);

@@ -15,12 +15,18 @@ use heapless::String;
 // //  2. Should not interfere in performance, only "big" state transitions should be tracked (not micromanage on bytes sent, etc...).
 // //  3. Non intrusive in application code.
 
+use core::{
+    option::Option::{self, None, Some},
+    task::Poll,
+};
+use stamp;
+use stamp::espressif::net;
+
 #[cfg(test)]
 extern crate std;
 
 // use strum::IntoEnumIterator;
 // use strum_macros::EnumIter;
-
 
 pub struct TaskOk {
     ssh: bool,
@@ -28,11 +34,7 @@ pub struct TaskOk {
     bridge: bool,
 }
 
-#[derive(Debug, PartialEq, Clone)]
-enum WifiMode {
-    ApMode,
-    StaMode,
-}
+use net::WifiMode;
 
 struct Settings {
     wifi_mode: Option<WifiMode>,
@@ -40,8 +42,7 @@ struct Settings {
     uart_baud: Option<u32>,
 }
 
-
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Copy, Clone, PartialEq)]
 pub enum State<'a> {
     PowerOn, // Both PowerOn and Reset represent states where peripherals are not initialised yet.
     Reset,
@@ -78,6 +79,12 @@ pub enum State<'a> {
     ClientNotify { error: &'a str },
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum Response {
+    Wait,
+    Complete,
+}
+
 // #[derive(Debug, Copy, Clone, EnumIter)]
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum Event {
@@ -94,6 +101,12 @@ pub enum Event {
     UartSettingsChanged,
     SshSettingsChanged,
     WifiSettingsChanged,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct EventResponse<T> {
+    pub event: Event,
+    pub response: Poll<T>,
 }
 
 pub struct StateMachine<'a> {
@@ -193,15 +206,17 @@ impl<'a> StateMachine<'a> {
             }
         };
     }
-    pub fn run(&mut self) -> Event {
-        let event: Event;
 
-        event = match self.state {
-            State::Failure(_) => Event::Fail,
-            State::Start => Event::AllGood,
-            State::PowerOn => self.power_on(true),
-            State::InitPeripherals => self.init_peripherals(true),
-            State::TcpInit => self.tcp_init(true),
+    pub fn run<Bool>(&mut self) -> EventResponse<bool> {
+        let event_response: EventResponse<bool> = match self.state {
+            // State::Failure(_) => Event::Fail,
+            State::Start => EventResponse {
+                event: Event::AllGood,
+                response: Poll::Ready(true),
+            },
+            State::PowerOn => self.power_on(),
+            State::InitPeripherals => self.init_peripherals(),
+            State::TcpInit => self.tcp_init(),
             State::TcpStartDefault => self.tcp_start(None),
             State::TcpStartApMode => self.tcp_start(Some(WifiMode::ApMode)),
             State::TcpStartStaMode => self.tcp_start(Some(WifiMode::StaMode)),
@@ -209,78 +224,121 @@ impl<'a> StateMachine<'a> {
             State::TaskRunning { name: "ssh" } => self.run_tasks("ssh"),
             State::TaskSpawning { name: "uart" } => self.spawn_tasks("uart"),
             State::TaskRunning { name: "uart" } => self.run_tasks("uart"),
-            State::AllTasksOk => self.all_tasks_ok(true),
-            State::BridgeInit => self.bridge_up(true),
-            State::Idle => self.idle(true),
-            State::ClientConnecting => self.connect_client(true),
-            State::AuthzChecks => self.authorization_checks(true),
-            State::SshConnInit => self.ssh_connection_initialisation(true),
-            State::ReadEnvVars => self.read_env_vars(true),
-            State::StoreEnvVars => self.store_env_vars(true),
+            State::AllTasksOk => self.all_tasks_ok(),
+            State::BridgeInit => self.bridge_up(),
+            State::Idle => self.idle(),
+            State::ClientConnecting => self.connect_client(),
+            State::AuthzChecks => self.authorization_checks(),
+            State::SshConnInit => self.ssh_connection_initialisation(),
+            State::ReadEnvVars => self.read_env_vars(),
+            State::StoreEnvVars => self.store_env_vars(),
             State::SshReconf => self.send_notification(Event::SshSettingsChanged),
             State::UartReconf => self.send_notification(Event::UartSettingsChanged),
             State::WifiReconf => self.send_notification(Event::WifiSettingsChanged),
             State::CheckBridge => self.check_bridge(),
-            State::SshUartBridgeEstablished => self.ssh_uart_bridge_established(true),
-            State::ClientConnectedNoBridge => self.client_connected_no_bridge(true),
+            State::SshUartBridgeEstablished => self.ssh_uart_bridge_established(),
+            State::ClientConnectedNoBridge => self.client_connected_no_bridge(),
             State::ClientNotify {
                 error: "Bridge error",
             } => self.notify_client("no bridge"),
-            _ => Event::Fail,
+            _ => EventResponse {
+                event: Event::Fail,
+                response: Poll::Pending,
+            },
         };
-        event
+
+        event_response
     }
 
-    fn power_on(&self, powergood: bool) -> Event {
+    fn power_on(&self) -> EventResponse<bool> {
         #[cfg(test)]
         std::println!("Powering up");
-        if powergood {
-            Event::AllGood
-        } else {
-            Event::Fail
+
+        let response: Poll<bool> = stamp::poll_power_on();
+        // let response: Poll<bool> = poll_once(stamp::power_on());
+        // poll_once(power_on())
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn init_peripherals(&self, peripheralgood: bool) -> Event {
+    fn init_peripherals(&self) -> EventResponse<bool> {
         #[cfg(test)]
         std::println!("Starting peripherals up");
-        if peripheralgood {
-            Event::AllGood
-        } else {
-            Event::Fail
+
+        let response: Poll<bool> = stamp::poll_init_peripherals();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn tcp_init(&self, tcp_init_good: bool) -> Event {
+    fn tcp_init(&self) -> EventResponse<bool> {
         #[cfg(test)]
         std::println!("Initalising TCP");
         // #[cfg(feature = "std")]
-        if tcp_init_good {
-            match self.settings.wifi_mode {
-                None => Event::StartDefaultAp,
-                Some(WifiMode::ApMode) => Event::StartApMode,
-                Some(WifiMode::StaMode) => Event::StartStaMode,
-            }
-        } else {
-            Event::Fail
+        let event = match self.settings.wifi_mode {
+            Some(WifiMode::ApMode) => Event::StartApMode,
+            Some(WifiMode::StaMode) => Event::StartStaMode,
+            _ => Event::StartDefaultAp,
+        };
+        let response: Poll<bool> = match event {
+            Event::StartDefaultAp => Poll::Ready(true),
+            Event::StartApMode => Poll::Ready(true),
+            Event::StartStaMode => Poll::Ready(true),
+            _ => Poll::Pending,
+        };
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn tcp_start(&self, wifimode: Option<WifiMode>) -> Event {
+    fn tcp_start(&self, wifimode: Option<WifiMode>) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Starting TCP Stack {:?}", wifimode);
-        if wifimode == None {
-            Event::AllGood
-        } else if wifimode == Some(WifiMode::ApMode) {
-            Event::AllGood
-        } else if wifimode == Some(WifiMode::StaMode) {
-            Event::AllGood
-        } else {
-            Event::Fail
+        let response: Poll<bool> = net::poll_wifi_up(wifimode);
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
-    fn spawn_tasks(&self, task: &str) -> Event {
+    fn spawn_tasks(&self, task: &str) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Spawning a task");
@@ -288,14 +346,23 @@ impl<'a> StateMachine<'a> {
             // #[cfg(feature = "std")]
             #[cfg(test)]
             std::println!("Spawning SSH task");
-            Event::AllGood
+            EventResponse {
+                event: Event::AllGood,
+                response: Poll::Ready(true),
+            }
         } else if task == "uart" {
             // #[cfg(feature = "std")]
             #[cfg(test)]
             std::println!("Spawning Uart task");
-            Event::AllGood
+            EventResponse {
+                event: Event::AllGood,
+                response: Poll::Ready(true),
+            }
         } else {
-            Event::Fail
+            EventResponse {
+                event: Event::Fail,
+                response: Poll::Ready(false),
+            }
         }
     }
 
@@ -304,7 +371,7 @@ impl<'a> StateMachine<'a> {
         task: &str,
         // settings: Settings,
         // mut tasks_ok: TaskOk,
-    ) -> Event {
+    ) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Running a task");
@@ -312,195 +379,1382 @@ impl<'a> StateMachine<'a> {
             // #[cfg(feature = "std")]
             #[cfg(test)]
             std::println!("Running SSH task");
-            self.task_ok.ssh = true;
-            Event::AllGood
+
+            let response: Poll<bool>;
+            response = stamp::serve::poll_handle_ssh_client();
+            let event: Event = match response {
+                Poll::Ready(value) => {
+                    if value {
+                        self.task_ok.ssh = true;
+                        Event::AllGood
+                    } else {
+                        Event::Fail
+                    }
+                }
+                Poll::Pending => Event::Fail,
+            };
+
+            EventResponse {
+                event: event,
+                response: response,
+            }
         } else if task == "uart" {
             // #[cfg(feature = "std")]
             #[cfg(test)]
             std::println!("Running Uart task");
-            self.task_ok.uart = true;
-            Event::AllGood
+
+            let response: Poll<bool>;
+            response = stamp::poll_uart_task();
+            let event: Event = match response {
+                Poll::Ready(value) => {
+                    if value {
+                        self.task_ok.uart = true;
+                        Event::AllGood
+                    } else {
+                        Event::Fail
+                    }
+                }
+                Poll::Pending => Event::Fail,
+            };
+
+            EventResponse {
+                event: event,
+                response: response,
+            }
         } else {
-            Event::Fail
+            EventResponse {
+                event: Event::Fail,
+                response: Poll::Ready(false),
+            }
         }
     }
 
-    fn all_tasks_ok(&self, all_tasks_ok: bool) -> Event {
+    fn all_tasks_ok(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Connecting to client");
-        if all_tasks_ok {
-            Event::AllGood
+        if self.task_ok.uart && self.task_ok.ssh {
+            EventResponse {
+                event: Event::AllGood,
+                response: Poll::Ready(true),
+            }
         } else {
-            Event::Fail
+            EventResponse {
+                event: Event::Fail,
+                response: Poll::Ready(false),
+            }
         }
     }
 
-    fn bridge_up(&self, bridge_up: bool) -> Event {
+    fn bridge_up(&mut self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Bridging SSH to UART");
-        if bridge_up {
-            Event::AllGood
-        } else {
-            Event::Fail
+        // serial::poll_serial_bridge();
+
+        let response: Poll<bool> = stamp::serial::poll_serial_bridge();
+
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    self.task_ok.bridge = true;
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn idle(&self, connect_client: bool) -> Event {
+    fn idle(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Connecting to client");
-        if connect_client {
-            Event::ClientConnect
-        } else if connect_client == false {
-            Event::Timeout
-        } else {
-            Event::AllGood
+
+        let response = net::poll_accept_requests();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::ClientConnect
+                } else {
+                    Event::Timeout
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn connect_client(&self, connect_client: bool) -> Event {
+    fn connect_client(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Connecting to client");
-        if connect_client {
-            Event::AllGood
-        } else {
-            Event::Fail
+        let response = stamp::serve::poll_handle_ssh_client();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn authorization_checks(&self, authz_checks: bool) -> Event {
+    fn authorization_checks(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Checking ssh authorisation");
-        if authz_checks {
-            Event::AllGood
-        } else {
-            Event::AccessDenied
+        let response = stamp::serve::poll_connection_loop();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::AccessDenied
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn ssh_connection_initialisation(&self, ssh_connection: bool) -> Event {
+    fn ssh_connection_initialisation(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Initialising ssh connection to client");
-        if ssh_connection {
-            Event::AllGood
-        } else {
-            Event::Fail
+        let response = stamp::serve::poll_connect_ssh_client();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn read_env_vars(&self, read_env_vars_ok: bool) -> Event {
+    fn read_env_vars(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Reading env vars from client");
-        if read_env_vars_ok {
-            Event::AllGood
-        } else {
-            Event::Fail
+
+        let response = stamp::settings::poll_read_env_vars();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn store_env_vars(
-        &mut self,
-        store_env_vars_ok: bool,
-        // mut settings: Settings,
-        // tasks_ok: TaskOk,
-    ) -> Event {
+    fn store_env_vars(&mut self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Storing env vars from client");
-        if store_env_vars_ok {
-            self.settings.wifi_mode = Some(WifiMode::ApMode);
-            self.settings.uart_baud = Some(9600);
-            self.settings.ssh_password = Some(String::<20>::new());
-            Event::AllGood
-        } else {
-            Event::Fail
+        let response = stamp::settings::poll_store_env_vars();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    self.settings.wifi_mode = Some(WifiMode::ApMode);
+                    self.settings.uart_baud = Some(9600);
+                    self.settings.ssh_password = Some(String::<20>::new());
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn send_notification(&self, notification_type: Event) -> Event {
+    fn send_notification(&self, notification_type: Event) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Sending notification to client");
+
+        let response: Poll<bool>;
         if notification_type == Event::SshSettingsChanged {
-            Event::AllGood
+            response = Poll::Ready(true);
         } else if notification_type == Event::UartSettingsChanged {
-            Event::AllGood
+            response = Poll::Ready(true);
         } else if notification_type == Event::WifiSettingsChanged {
-            Event::AllGood
+            response = Poll::Ready(true);
         } else {
-            Event::Fail
+            response = Poll::Pending;
+        }
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn check_bridge(&self) -> Event {
+    fn check_bridge(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Checking if bridge is up");
+
         if self.task_ok.bridge {
-            Event::AllGood
+            EventResponse {
+                event: Event::AllGood,
+                response: Poll::Ready(true),
+            }
         } else {
-            Event::Fail
+            EventResponse {
+                event: Event::Fail,
+                response: Poll::Ready(false),
+            }
         }
     }
 
-    fn ssh_uart_bridge_established(&self, client_disconnect: bool) -> Event {
+    fn ssh_uart_bridge_established(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Storing env vars from client");
-        if client_disconnect {
-            Event::SshDisconnect
-        } else {
-            Event::AllGood
+
+        let response = stamp::serve::poll_ssh_client_connected();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::SshDisconnect
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn client_connected_no_bridge(&self, notify_prepared: bool) -> Event {
+    fn client_connected_no_bridge(&self) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Prepare to notify client of no bridge");
-        if notify_prepared {
-            Event::AllGood
-        } else {
-            Event::Fail
+
+        let response: Poll<bool> = stamp::serve::poll_ssh_client_connected_no_bridge();
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::AllGood
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 
-    fn notify_client(&self, client_notified: &str) -> Event {
+    fn notify_client(&self, client_notified: &str) -> EventResponse<bool> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Notified client of no bridge");
-        if client_notified == "no bridge" {
-            Event::SshDisconnect
-        } else {
-            Event::Fail
+
+        let response = stamp::serve::poll_notify_client(client_notified);
+        let event: Event = match response {
+            Poll::Ready(value) => {
+                if value {
+                    Event::SshDisconnect
+                } else {
+                    Event::Fail
+                }
+            }
+            Poll::Pending => Event::Fail,
+        };
+
+        EventResponse {
+            event: event,
+            response: response,
         }
     }
 }
 
-// #[unsafe(no_mangle)]
-// #[cfg(feature = "std")]
-// #[entry]
-// #[cfg(feature = "std")]
-// #[cfg(test)]
-// #[cfg_attr(not(test), entry)]
-// #[cfg(not(test))]
-// cfg_if::cfg_if! {
-// if #[cfg(any(feature = "test"))] {
+#[cfg(test)]
+use injectorpp::interface::injector::*; //used for sans-io testing
+// use core::future::Future;
 
 #[cfg(test)]
 mod tests {
-
     extern crate std;
+
     use super::*;
 
+    //
+    // Testing Run Events
+    //
+
     #[test]
-    fn power_on_to_init_peripherals() {
+    fn run_poweron_allgood() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn (stamp::poll_power_on)() -> Poll<bool>))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+        let response = state_machine.power_on();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_power_on_fail() {
+        let state_machine = StateMachine::new();
+
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_power_on)() ->Poll<bool> ))
+            // .when_called(injectorpp::func!(fn(poll_once)() ->Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.power_on();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_init_peripherals_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_init_peripherals)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.init_peripherals();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_init_peripherals_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_init_peripherals)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.init_peripherals();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_init_peripherals_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_init_peripherals)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.init_peripherals();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_tcp_init_default() {
+        let mut state_machine = StateMachine::new();
+        state_machine.settings.wifi_mode = None;
+        let response = state_machine.tcp_init();
+        assert_eq!(response.event, Event::StartDefaultAp);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_init_apmode() {
+        let mut state_machine = StateMachine::new();
+        state_machine.settings.wifi_mode = Some(WifiMode::ApMode);
+        let response = state_machine.tcp_init();
+        assert_eq!(response.event, Event::StartApMode);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_init_stamode() {
+        let mut state_machine = StateMachine::new();
+        state_machine.settings.wifi_mode = Some(WifiMode::StaMode);
+        let response = state_machine.tcp_init();
+        assert_eq!(response.event, Event::StartStaMode);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_init_empty() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.tcp_init();
+        assert_eq!(response.event, Event::StartDefaultAp);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_start_default_success() {
+        let state_machine = StateMachine::new();
+
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.tcp_start(None);
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_start_apmode_success() {
+        let state_machine = StateMachine::new();
+
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.tcp_start(Some(WifiMode::ApMode));
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_start_stamode_success() {
+        let state_machine = StateMachine::new();
+
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.tcp_start(Some(WifiMode::StaMode));
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_tcp_start_fail() {
+        let state_machine = StateMachine::new();
+
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.tcp_start(None);
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_tcp_start_pending() {
+        let state_machine = StateMachine::new();
+
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.tcp_start(None);
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_spawn_tasks_ssh_success() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.spawn_tasks("ssh");
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_spawn_tasks_uart_success() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.spawn_tasks("ssh");
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_spawn_tasks_fail() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.spawn_tasks("");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_run_tasks_ssh_success() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_handle_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.run_tasks("ssh");
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+        assert_eq!(state_machine.task_ok.ssh, true);
+    }
+
+    #[test]
+    fn run_run_tasks_ssh_fail() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_handle_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.run_tasks("ssh");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+        assert_eq!(state_machine.task_ok.ssh, false);
+    }
+
+    #[test]
+    fn run_run_tasks_ssh_pending() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_handle_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.run_tasks("ssh");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+        assert_eq!(state_machine.task_ok.ssh, false);
+    }
+
+    #[test]
+    fn run_run_tasks_uart_success() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_uart_task)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.run_tasks("uart");
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+        assert_eq!(state_machine.task_ok.uart, true);
+    }
+
+    #[test]
+    fn run_run_tasks_uart_fail() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_uart_task)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.run_tasks("uart");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+        assert_eq!(state_machine.task_ok.uart, false);
+    }
+
+    #[test]
+    fn run_run_tasks_uart_pending() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::poll_uart_task)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.run_tasks("uart");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+        assert_eq!(state_machine.task_ok.uart, false);
+    }
+
+    #[test]
+    fn run_run_tasks_fail() {
+        let mut state_machine = StateMachine::new();
+        let response = state_machine.run_tasks("");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_all_tasks_ok_success() {
+        let mut state_machine = StateMachine::new();
+        state_machine.task_ok.uart = true;
+        state_machine.task_ok.ssh = true;
+        let response = state_machine.all_tasks_ok();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_all_tasks_ok_uart_fail() {
+        let mut state_machine = StateMachine::new();
+        state_machine.task_ok.ssh = true;
+        let response = state_machine.all_tasks_ok();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_all_tasks_ok_ssh_fail() {
+        let mut state_machine = StateMachine::new();
+        state_machine.task_ok.uart = true;
+        let response = state_machine.all_tasks_ok();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_all_tasks_ok_all_fail() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.all_tasks_ok();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_bridge_up_fail() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::serial::poll_serial_bridge)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.bridge_up();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+        assert_eq!(state_machine.task_ok.bridge, false);
+    }
+
+    #[test]
+    fn run_bridge_up_success() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::serial::poll_serial_bridge)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.bridge_up();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+        assert_eq!(state_machine.task_ok.bridge, true);
+    }
+
+    #[test]
+    fn run_bridge_up_pending() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::serial::poll_serial_bridge)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.bridge_up();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+        assert_eq!(state_machine.task_ok.bridge, false);
+    }
+
+    #[test]
+    fn run_idle_connection() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_accept_requests)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.idle();
+        assert_eq!(response.event, Event::ClientConnect);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_idle_timeout() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_accept_requests)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.idle();
+        assert_eq!(response.event, Event::Timeout);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_idle_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(net::poll_accept_requests)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.idle();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_connect_client_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_handle_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.connect_client();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_connect_client_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_handle_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.connect_client();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_connect_client_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_handle_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.connect_client();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_authorization_checks_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::serve::poll_connection_loop)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.authorization_checks();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_authorization_checks_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::serve::poll_connection_loop)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.authorization_checks();
+        assert_eq!(response.event, Event::AccessDenied);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_authorization_checks_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(injectorpp::func!(fn(stamp::serve::poll_connection_loop)() -> Poll<bool> ))
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.authorization_checks();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::<bool>::Pending);
+    }
+
+    #[test]
+    fn run_ssh_connection_initialisation_succcess() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_connect_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.ssh_connection_initialisation();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_ssh_connection_initialisation_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_connect_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.ssh_connection_initialisation();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_ssh_connection_initialisation_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_connect_ssh_client)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.ssh_connection_initialisation();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_read_env_vars_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::settings::poll_read_env_vars)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.read_env_vars();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_read_env_vars_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::settings::poll_read_env_vars)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.read_env_vars();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_read_env_vars_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::settings::poll_read_env_vars)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.read_env_vars();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_store_env_vars_success() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::settings::poll_store_env_vars)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.store_env_vars();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+        assert_eq!(state_machine.settings.wifi_mode, Some(WifiMode::ApMode));
+        assert_eq!(state_machine.settings.uart_baud, Some(9600));
+        assert_eq!(
+            state_machine.settings.ssh_password,
+            Some(String::<20>::new())
+        );
+    }
+
+    #[test]
+    fn run_store_env_vars_fail() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::settings::poll_store_env_vars)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.store_env_vars();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_store_env_vars_pending() {
+        let mut state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::settings::poll_store_env_vars)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.store_env_vars();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_send_notification_ssh() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.send_notification(Event::SshSettingsChanged);
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_send_notification_uart() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.send_notification(Event::UartSettingsChanged);
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_send_notification_wifi() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.send_notification(Event::WifiSettingsChanged);
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_send_notification_pending() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.send_notification(Event::Fail);
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_check_bridge_success() {
+        let mut state_machine = StateMachine::new();
+        state_machine.task_ok.bridge = true;
+        let response = state_machine.check_bridge();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_check_bridge_fail() {
+        let state_machine = StateMachine::new();
+        let response = state_machine.check_bridge();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_ssh_uart_bridge_established_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_ssh_client_connected)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.ssh_uart_bridge_established();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_ssh_uart_bridge_established_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_ssh_client_connected)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.ssh_uart_bridge_established();
+        assert_eq!(response.event, Event::SshDisconnect);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_ssh_uart_bridge_established_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_ssh_client_connected)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.ssh_uart_bridge_established();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_client_connected_no_bridge_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_ssh_client_connected_no_bridge)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.client_connected_no_bridge();
+        assert_eq!(response.event, Event::AllGood);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_client_connected_no_bridge_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_ssh_client_connected_no_bridge)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.client_connected_no_bridge();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_client_connected_no_bridge_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_ssh_client_connected_no_bridge)() -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn() -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.client_connected_no_bridge();
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    #[test]
+    fn run_notify_client_success() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_notify_client)(&str) -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_string: &str) -> Poll<bool>,
+                returns: Poll::Ready(true),
+                times: 1
+            ));
+
+        let response = state_machine.notify_client("no bridge");
+        assert_eq!(response.event, Event::SshDisconnect);
+        assert_eq!(response.response, Poll::Ready(true));
+    }
+
+    #[test]
+    fn run_notify_client_fail() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_notify_client)(&str) -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_string: &str) -> Poll<bool>,
+                returns: Poll::Ready(false),
+                times: 1
+            ));
+
+        let response = state_machine.notify_client("");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Ready(false));
+    }
+
+    #[test]
+    fn run_notify_client_pending() {
+        let state_machine = StateMachine::new();
+        let mut injector = InjectorPP::new();
+        injector
+            .when_called(
+                injectorpp::func!(fn(stamp::serve::poll_notify_client)(&str) -> Poll<bool> ),
+            )
+            .will_execute(injectorpp::fake!(
+                func_type: fn(_string: &str) -> Poll<bool>,
+                returns: Poll::Pending,
+                times: 1
+            ));
+
+        let response = state_machine.notify_client("");
+        assert_eq!(response.event, Event::Fail);
+        assert_eq!(response.response, Poll::Pending);
+    }
+
+    //
+    //
+    //
+    // Testing State Changes
+    //
+    //
+    //
+    #[test]
+    fn next_power_on_to_init_peripherals() {
         let mut state_machine = StateMachine::new();
         let event: Event = Event::AllGood;
         state_machine.next(event);
@@ -508,7 +1762,7 @@ mod tests {
     }
 
     #[test]
-    fn power_on_not_good() {
+    fn net_power_on_not_good() {
         let mut state_machine = StateMachine::new();
         let event: Event = Event::Fail;
         state_machine.next(event);
@@ -516,7 +1770,7 @@ mod tests {
     }
 
     #[test]
-    fn reset_to_init_peripherals() {
+    fn next_reset_to_init_peripherals() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::Reset;
         let event: Event = Event::AllGood;
@@ -525,7 +1779,7 @@ mod tests {
     }
 
     #[test]
-    fn init_peripherals_fail() {
+    fn next_init_peripherals_fail() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::InitPeripherals;
         let event: Event = Event::Fail;
@@ -534,7 +1788,7 @@ mod tests {
     }
 
     #[test]
-    fn init_peripherals_to_tcp_init() {
+    fn next_init_peripherals_to_tcp_init() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::InitPeripherals;
         let event: Event = Event::AllGood;
@@ -543,7 +1797,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_init_to_tcp_start_default() {
+    fn next_tcp_init_to_tcp_start_default() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpInit;
         let event: Event = Event::StartDefaultAp;
@@ -552,7 +1806,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_start_default_to_ssh() {
+    fn next_tcp_start_default_to_ssh() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartDefault;
         let event: Event = Event::AllGood;
@@ -561,7 +1815,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_start_default_fail() {
+    fn next_tcp_start_default_fail() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartDefault;
         let event: Event = Event::Fail;
@@ -570,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_init_to_tcp_start_ap_mode() {
+    fn next_tcp_init_to_tcp_start_ap_mode() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpInit;
         let event: Event = Event::StartApMode;
@@ -580,7 +1834,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_start_ap_mode_to_ssh() {
+    fn next_tcp_start_ap_mode_to_ssh() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartApMode;
         let event: Event = Event::AllGood;
@@ -589,7 +1843,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_start_ap_mode_fail() {
+    fn next_tcp_start_ap_mode_fail() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartApMode;
         let event: Event = Event::Fail;
@@ -598,7 +1852,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_init_to_tcp_start_sta_mode() {
+    fn next_tcp_init_to_tcp_start_sta_mode() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpInit;
         let event: Event = Event::StartStaMode;
@@ -608,7 +1862,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_start_sta_mode_to_ssh() {
+    fn next_tcp_start_sta_mode_to_ssh() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartStaMode;
         let event: Event = Event::AllGood;
@@ -617,7 +1871,7 @@ mod tests {
     }
 
     #[test]
-    fn tcp_start_sta_mode_fail() {
+    fn next_tcp_start_sta_mode_fail() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TcpStartStaMode;
         let event: Event = Event::Fail;
@@ -626,7 +1880,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_init_to_ssh_running() {
+    fn next_ssh_init_to_ssh_running() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TaskSpawning { name: ("ssh") };
         let event: Event = Event::AllGood;
@@ -635,7 +1889,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_running_to_uart_init() {
+    fn next_ssh_running_to_uart_init() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TaskRunning { name: ("ssh") };
         let event: Event = Event::AllGood;
@@ -646,7 +1900,7 @@ mod tests {
     }
 
     #[test]
-    fn uart_init_to_uart_running() {
+    fn next_uart_init_to_uart_running() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TaskSpawning { name: ("uart") };
         let event: Event = Event::AllGood;
@@ -655,7 +1909,7 @@ mod tests {
     }
 
     #[test]
-    fn uart_running_to_bridge_init() {
+    fn next_uart_running_to_bridge_init() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TaskRunning { name: ("uart") };
         let event: Event = Event::AllGood;
@@ -664,7 +1918,7 @@ mod tests {
     }
 
     #[test]
-    fn uart_running_fail_to_idle() {
+    fn next_uart_running_fail_to_idle() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::TaskRunning { name: ("uart") };
         let event: Event = Event::Fail;
@@ -673,7 +1927,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_init_to_idle() {
+    fn next_bridge_init_to_idle() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::BridgeInit;
         let event: Event = Event::AllGood;
@@ -682,7 +1936,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_init_fail_to_idle() {
+    fn next_bridge_init_fail_to_idle() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::BridgeInit;
         let event: Event = Event::Fail;
@@ -691,7 +1945,7 @@ mod tests {
     }
 
     #[test]
-    fn idle_to_client_connecting() {
+    fn next_idle_to_client_connecting() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::Idle;
         let event: Event = Event::ClientConnect;
@@ -700,7 +1954,7 @@ mod tests {
     }
 
     #[test]
-    fn client_connecting_to_timeout() {
+    fn next_client_connecting_to_timeout() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ClientConnecting;
         let event: Event = Event::Timeout;
@@ -709,7 +1963,7 @@ mod tests {
     }
 
     #[test]
-    fn client_connecting_authorisation_checks() {
+    fn next_client_connecting_authorisation_checks() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ClientConnecting;
         let event: Event = Event::AllGood;
@@ -718,7 +1972,7 @@ mod tests {
     }
 
     #[test]
-    fn authorisation_checks_to_timeout() {
+    fn next_authorisation_checks_to_timeout() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::AuthzChecks;
         let event: Event = Event::Timeout;
@@ -727,7 +1981,7 @@ mod tests {
     }
 
     #[test]
-    fn authorisation_checks_to_access_denied() {
+    fn next_authorisation_checks_to_access_denied() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::AuthzChecks;
         let event: Event = Event::AccessDenied;
@@ -736,7 +1990,7 @@ mod tests {
     }
 
     #[test]
-    fn authorisation_checks_to_access_granted() {
+    fn next_authorisation_checks_to_access_granted() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::AuthzChecks;
         let event: Event = Event::AllGood;
@@ -745,7 +1999,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_init_to_read_env_vars() {
+    fn next_ssh_init_to_read_env_vars() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::SshConnInit;
         let event: Event = Event::AllGood;
@@ -754,7 +2008,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_init_dropped() {
+    fn next_ssh_init_dropped() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::SshConnInit;
         let event: Event = Event::SshDisconnect;
@@ -763,7 +2017,7 @@ mod tests {
     }
 
     #[test]
-    fn read_env_vars_validation_error() {
+    fn next_read_env_vars_validation_error() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ReadEnvVars;
         let event: Event = Event::Fail;
@@ -776,7 +2030,7 @@ mod tests {
         );
     }
     #[test]
-    fn notify_validation_error_to_idle() {
+    fn next_notify_validation_error_to_idle() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ClientNotify {
             error: ("Input validation error"),
@@ -786,7 +2040,7 @@ mod tests {
         assert_eq!(state_machine.state, State::Idle);
     }
     #[test]
-    fn read_env_vars_ok() {
+    fn next_read_env_vars_ok() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ReadEnvVars;
         let event: Event = Event::AllGood;
@@ -795,7 +2049,7 @@ mod tests {
     }
 
     #[test]
-    fn store_env_vars_no_change_bridge_ok() {
+    fn next_store_env_vars_no_change_bridge_ok() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::StoreEnvVars;
         let event: Event = Event::AllGood;
@@ -805,7 +2059,7 @@ mod tests {
     }
 
     #[test]
-    fn client_connected_ssh_uart_bridge_to_disconnect() {
+    fn next_client_connected_ssh_uart_bridge_to_disconnect() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::SshUartBridgeEstablished;
         let event: Event = Event::SshDisconnect;
@@ -815,7 +2069,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_check_ok() {
+    fn next_bridge_check_ok() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::CheckBridge;
         let event: Event = Event::AllGood;
@@ -825,7 +2079,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_check_error() {
+    fn next_bridge_check_error() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::CheckBridge;
         let event: Event = Event::Fail;
@@ -834,7 +2088,7 @@ mod tests {
     }
 
     #[test]
-    fn client_connected_bridge_error_to_notify() {
+    fn next_client_connected_bridge_error_to_notify() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ClientConnectedNoBridge;
         let event: Event = Event::AllGood;
@@ -848,7 +2102,7 @@ mod tests {
     }
 
     #[test]
-    fn bridge_error_notify_to_disconnect() {
+    fn next_bridge_error_notify_to_disconnect() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::ClientNotify {
             error: ("Bridge error"),
@@ -859,7 +2113,7 @@ mod tests {
     }
 
     #[test]
-    fn store_env_vars_ssh_changed() {
+    fn next_store_env_vars_ssh_changed() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::StoreEnvVars;
         let event: Event = Event::SshSettingsChanged;
@@ -868,7 +2122,7 @@ mod tests {
     }
 
     #[test]
-    fn ssh_changed_to_ssh_init() {
+    fn next_ssh_changed_to_ssh_init() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::SshReconf;
         let event: Event = Event::AllGood;
@@ -877,7 +2131,7 @@ mod tests {
     }
 
     #[test]
-    fn store_env_vars_wifi_changed() {
+    fn next_store_env_vars_wifi_changed() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::StoreEnvVars;
         let event: Event = Event::WifiSettingsChanged;
@@ -886,7 +2140,7 @@ mod tests {
     }
 
     #[test]
-    fn wifi_changed_to_tcp_init() {
+    fn next_wifi_changed_to_tcp_init() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::WifiReconf;
         let event: Event = Event::AllGood;
@@ -895,7 +2149,7 @@ mod tests {
     }
 
     #[test]
-    fn store_env_vars_uart_changed() {
+    fn next_store_env_vars_uart_changed() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::StoreEnvVars;
         let event: Event = Event::UartSettingsChanged;
@@ -904,7 +2158,7 @@ mod tests {
     }
 
     #[test]
-    fn uart_changed_to_uart_init() {
+    fn next_uart_changed_to_uart_init() {
         let mut state_machine = StateMachine::new();
         state_machine.state = State::UartReconf;
         let event: Event = Event::AllGood;
