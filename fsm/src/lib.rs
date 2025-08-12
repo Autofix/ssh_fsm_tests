@@ -19,8 +19,99 @@ use core::{
     option::Option::{self, None, Some},
     task::Poll,
 };
+
+pub mod fake_stamp {
+    use core::task::Poll;
+
+    pub fn poll_power_on() -> Poll<bool> {
+        Poll::Pending
+    }
+    pub fn poll_init_peripherals() -> Poll<bool> {
+        Poll::Pending
+    }
+    pub fn poll_uart_task() -> Poll<bool> {
+        Poll::Pending
+    }
+    pub mod serial {
+        use core::task::Poll;
+        pub fn poll_serial_bridge() -> Poll<bool> {
+            Poll::Pending
+        }
+    }
+    pub mod serve {
+        use core::task::Poll;
+        pub fn poll_connection_loop() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_authentication() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_handle_ssh_client() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_connect_ssh_client() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_ssh_client_connected() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_ssh_client_connected_no_bridge() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_notify_client(_client_notified: &str) -> Poll<bool> {
+            Poll::Pending
+        }
+    }
+    pub mod settings {
+        use core::task::Poll;
+        pub fn poll_read_env_vars() -> Poll<bool> {
+            Poll::Pending
+        }
+        pub fn poll_store_env_vars() -> Poll<bool> {
+            Poll::Pending
+        }
+    }
+    pub mod espressif {
+        pub mod net {
+            use core::task::Poll;
+            #[derive(Debug, PartialEq, Clone)]
+            pub enum WifiMode {
+                ApMode,
+                StaMode,
+            }
+            pub fn poll_if_up() -> Poll<bool> {
+                Poll::Pending
+            }
+            pub fn poll_accept_requests() -> Poll<bool> {
+                Poll::Pending
+            }
+            pub fn poll_wifi_up(_wifimode: Option<WifiMode>) -> Poll<bool> {
+                Poll::Pending
+            }
+            pub fn poll_net_up() -> Poll<bool> {
+                Poll::Pending
+            }
+            pub fn poll_dhcp_server() -> Poll<bool> {
+                Poll::Pending
+            }
+        }
+    }
+}
+
+#[cfg(feature = "test")]
+pub use crate::fake_stamp as stamp;
+#[cfg(not(feature = "test"))]
 use stamp;
+
+#[cfg(feature = "test")]
+pub use crate::fake_stamp::espressif::net;
+#[cfg(not(feature = "test"))]
 use stamp::espressif::net;
+
+#[cfg(feature = "test")]
+use crate::fake_stamp::espressif::net::WifiMode;
+#[cfg(not(feature = "test"))]
+use net::WifiMode;
 
 #[cfg(test)]
 extern crate std;
@@ -33,8 +124,6 @@ pub struct TaskOk {
     uart: bool,
     bridge: bool,
 }
-
-use net::WifiMode;
 
 struct Settings {
     wifi_mode: Option<WifiMode>,

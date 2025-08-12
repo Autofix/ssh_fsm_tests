@@ -8,12 +8,13 @@ cfg-if = "1.0.0"
 strum = { version = "0.27.1", default-features = false }
 strum_macros = { version = "0.27.1", default-features = false }
 heapless = "0.8"
-stamp = { path ="../stamp/" }
 embassy-futures = "0.1"
+stamp = { path ="../stamp/", optional = true }
 
 [dev-dependencies]
 #proptest-state-machine
 injectorpp = "0.4.0"
 
 [features]
-esp32c6 = []
+esp32c6 = ["stamp"]
+test = []
