@@ -85,7 +85,7 @@ pub mod fake_stamp {
             pub fn poll_accept_requests() -> Poll<bool> {
                 Poll::Pending
             }
-            pub fn poll_wifi_up(_wifimode: Option<WifiMode>) -> Poll<bool> {
+            pub fn poll_wifi_mode_up(_wifimode: Option<WifiMode>) -> Poll<bool> {
                 Poll::Pending
             }
             pub fn poll_net_up() -> Poll<bool> {
@@ -410,7 +410,7 @@ impl<'a> StateMachine<'a> {
         // #[cfg(feature = "std")]
         #[cfg(test)]
         std::println!("Starting TCP Stack {:?}", wifimode);
-        let response: Poll<bool> = net::poll_wifi_up(wifimode);
+        let response: Poll<bool> = net::poll_wifi_mode_up(wifimode);
         let event: Event = match response {
             Poll::Ready(value) => {
                 if value {
@@ -959,7 +959,9 @@ mod tests {
 
         let mut injector = InjectorPP::new();
         injector
-            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .when_called(
+                injectorpp::func!(fn(net::poll_wifi_mode_up)(Option<WifiMode>) -> Poll<bool> ),
+            )
             .will_execute(injectorpp::fake!(
                 func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
                 returns: Poll::Ready(true),
@@ -977,7 +979,9 @@ mod tests {
 
         let mut injector = InjectorPP::new();
         injector
-            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .when_called(
+                injectorpp::func!(fn(net::poll_wifi_mode_up)(Option<WifiMode>) -> Poll<bool> ),
+            )
             .will_execute(injectorpp::fake!(
                 func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
                 returns: Poll::Ready(true),
@@ -995,7 +999,9 @@ mod tests {
 
         let mut injector = InjectorPP::new();
         injector
-            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .when_called(
+                injectorpp::func!(fn(net::poll_wifi_mode_up)(Option<WifiMode>) -> Poll<bool> ),
+            )
             .will_execute(injectorpp::fake!(
                 func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
                 returns: Poll::Ready(true),
@@ -1013,7 +1019,9 @@ mod tests {
 
         let mut injector = InjectorPP::new();
         injector
-            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .when_called(
+                injectorpp::func!(fn(net::poll_wifi_mode_up)(Option<WifiMode>) -> Poll<bool> ),
+            )
             .will_execute(injectorpp::fake!(
                 func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
                 returns: Poll::Ready(false),
@@ -1031,7 +1039,9 @@ mod tests {
 
         let mut injector = InjectorPP::new();
         injector
-            .when_called(injectorpp::func!(fn(net::poll_wifi_up)(Option<WifiMode>) -> Poll<bool> ))
+            .when_called(
+                injectorpp::func!(fn(net::poll_wifi_mode_up)(Option<WifiMode>) -> Poll<bool> ),
+            )
             .will_execute(injectorpp::fake!(
                 func_type: fn(_wifimode: Option<WifiMode>) -> Poll<bool>,
                 returns: Poll::Pending,

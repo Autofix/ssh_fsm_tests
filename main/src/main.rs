@@ -106,9 +106,11 @@ use embassy_executor::Spawner;
 use fsm::EventResponse;
 // use static_cell::StaticCell;
 //
+pub static SPAWNER_MUTEX: Mutex<CriticalSectionRawMutex, Option<Spawner>> = Mutex::new(None);
 // #[main]
 #[esp_hal_embassy::main]
-pub async fn main(_spawner: Spawner) {
+pub async fn main(spawner: Spawner) {
+    *(SPAWNER_MUTEX.lock().await) = Some(spawner);
     // System init
     // let peripherals = esp_hal::init({ esp_hal::Config::default() });
     // let mut rng = Rng::new(peripherals.RNG);
@@ -137,6 +139,7 @@ pub async fn main(_spawner: Spawner) {
             // You could also add State::enter() and State::exit()
             loop {
                 event_response = state_machine.run::<bool>();
+
                 // keep polling until task complete
                 if event_response.response == Poll::Pending {
                     continue;
